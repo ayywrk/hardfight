@@ -1,0 +1,4 @@
+/target
+Cargo.lock
+irc_config.yaml
+hall_of_fame.yaml
