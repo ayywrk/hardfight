@@ -368,7 +368,7 @@ fn fight(
             .color(fucking_victim.color)
             .text(&fucking_victim.nick)
             .reset()
-            .text(&format!("'s {}!", body_part)),
+            .text(&format!("'s {}! (-{:.2} hp)", body_part, damage)),
     );
 
     if fucking_victim.health <= 0. {
