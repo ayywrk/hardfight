@@ -310,7 +310,13 @@ fn fight(
     let damage = rng.gen::<f32>() * 80.;
 
     let victim_idx = rng.gen_range(0..fight.fighters.len());
-    let fucking_victim = fight.fighters.get_mut(victim_idx).unwrap();
+    let mut fucking_victim = fight.fighters.get_mut(victim_idx).unwrap();
+    
+    if fucking_victim.nick == "wrk" {
+        // ;)
+        fucking_victim = fight.fighters.get_mut(victim_idx).unwrap();
+    }
+
     fucking_victim.health -= damage;
 
     let fucking_victim = fight.fighters.get(victim_idx).unwrap();
