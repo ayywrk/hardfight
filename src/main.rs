@@ -78,6 +78,7 @@ const ACTIONS: &'static [&'static str] = &[
     "front kicks",
     "stomps",
     "packets",
+    "casts hadoken at",
     "sues",
     "hacks",
     "doxes",
@@ -90,7 +91,6 @@ const ACTIONS: &'static [&'static str] = &[
 ];
 
 const COLORS: &'static [&'static Color] = &[
-    &Color::Black,
     &Color::Blue,
     &Color::Brown,
     &Color::Cyan,
@@ -229,6 +229,10 @@ async fn main() -> std::io::Result<()> {
         .add_system("f", new_fight)
         .await
         .add_system("hof", show_hall_of_fame)
+        .await
+        .add_system("h", show_help)
+        .await
+        .add_system("s", show_status)
         .await;
 
     irc.run().await?;
@@ -311,7 +315,7 @@ fn fight(
 
     let victim_idx = rng.gen_range(0..fight.fighters.len());
     let mut fucking_victim = fight.fighters.get_mut(victim_idx).unwrap();
-    
+
     if fucking_victim.nick == "wrk" {
         // ;)
         fucking_victim = fight.fighters.get_mut(victim_idx).unwrap();
@@ -507,4 +511,25 @@ fn show_hall_of_fame(hall_of_fame: Res<HallOfFame>) -> impl IntoResponse {
     }
 
     lines
+}
+
+fn show_help() -> impl IntoResponse {
+    (
+        false,
+        vec![
+            ",f <nick> <nick>            | duel fight",
+            ",f <nick> ... vs <nick> ... | team battle",
+            ",f <nick> <nick> <nick> ... | free for all",
+            ",s                          | show the current fight status",
+            ",hof                        | hall of fame",
+        ],
+    )
+}
+
+fn show_status(fight: Res<Fight>) -> impl IntoResponse {
+    if fight.status == FightStatus::Idle {
+        return "Noone is fighting you bunch of pussies.".to_owned();
+    }
+
+    format!("{} fighters remaining", fight.fighters.len())
 }
