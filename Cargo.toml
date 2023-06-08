@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ircie = { path = "../drugwars_v2/ircie" }
+ircie = { path = "../ircie" }
 tokio = { version = "1.28.2", features = ["full"] }
 env_logger = "0.10.0"
 rand = "0.8.5"
