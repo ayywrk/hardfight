@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     ops::{Deref, DerefMut},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use ircie::{
@@ -11,7 +11,7 @@ use ircie::{
     irc_command::IrcCommand,
     system::IntoResponse,
     system_params::{AnyArguments, Arguments, Channel, Context, Res, ResMut},
-    Irc,
+    Irc, IrcPrefix,
 };
 use itertools::Itertools;
 use rand::{
@@ -195,14 +195,17 @@ impl Default for Fighter {
 enum FightKind {
     #[default]
     Duel,
+    DeathMatch,
     FreeForAll,
+    RoyalRumble,
     TeamBattle,
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq)]
 enum FightStatus {
     Happening,
     WaitingWho,
+    WaitingChallengee(String, SystemTime),
     #[default]
     Idle,
 }
@@ -212,7 +215,18 @@ struct Fight {
     status: FightStatus,
     channel: String,
     kind: FightKind,
+    challengee: Option<String>,
     fighters: Vec<Fighter>,
+}
+
+impl Fight {
+    pub fn reset(&mut self) {
+        self.status = FightStatus::Idle;
+        self.channel = "".to_owned();
+        self.kind = FightKind::Duel;
+        self.challengee = None;
+        self.fighters.clear();
+    }
 }
 
 #[tokio::main]
@@ -231,11 +245,15 @@ async fn main() -> std::io::Result<()> {
         .await
         .add_event_system(IrcCommand::RPL_WHOREPLY, whoreply)
         .await
-        .add_event_system(IrcCommand::RPL_ENDOFWHO, start_rumble)
+        .add_event_system(IrcCommand::RPL_ENDOFWHO, endofwho)
         .await
         .add_system("f", new_fight)
         .await
         .add_system("royalrumble", royal_rumble)
+        .await
+        .add_system("challenge", challenge)
+        .await
+        .add_system("accept", accept_challenge)
         .await
         .add_system("hof", show_hall_of_fame)
         .await
@@ -256,8 +274,24 @@ fn fight(
     mut rng: ResMut<StdRng>,
     mut hall_of_fame: ResMut<HallOfFame>,
 ) {
+    if let FightStatus::WaitingChallengee(nick, time) = &fight.status {
+        if let Ok(elapsed) = time.elapsed() {
+            if elapsed.as_secs() > 30 {
+                ctx.privmsg(
+                    &fight.channel,
+                    &Msg::new()
+                        .color(Color::Yellow)
+                        .text(&format!("{} pussied out.", nick))
+                        .to_string(),
+                );
+
+                fight.reset();
+                return;
+            }
+        }
+    }
+
     if fight.status != FightStatus::Happening {
-        std::thread::sleep(Duration::from_millis(50));
         return;
     }
 
@@ -406,6 +440,14 @@ fn fight(
         );
         hall_of_fame.add_fucking_looser(&fucking_victim.nick);
         ctx.mode(&fight.channel, &format!("-v {}", fucking_victim.nick));
+
+        if fight.kind == FightKind::DeathMatch {
+            ctx.kick(
+                &fight.channel,
+                &fucking_victim.nick,
+                Some("You fucking suck"),
+            );
+        }
         fight.fighters.remove(victim_idx);
     }
 
@@ -420,8 +462,8 @@ fn new_fight(
     mut fight: ResMut<Fight>,
     mut rng: ResMut<StdRng>,
 ) -> impl IntoResponse {
-    if fight.status == FightStatus::Happening {
-        return Err("Shut up and watch the show".to_owned());
+    if let Err(e) = check_idle(&fight.status) {
+        return Err(e);
     }
 
     if arguments.len() < 2 {
@@ -467,6 +509,7 @@ fn new_fight(
                 fight.fighters.push(Fighter::new(f, team_color, team_idx));
             }
         }
+        _ => {}
     }
 
     fight.status = FightStatus::Happening;
@@ -487,6 +530,16 @@ fn new_fight(
             Msg::new()
                 .color(Color::Yellow)
                 .text("Tonight's fight is a free for all!"),
+        ),
+        FightKind::RoyalRumble => init_msg.push(
+            Msg::new()
+                .color(Color::Yellow)
+                .text("Tonight's fight is a RRRRRRROYAL RUMBLE!"),
+        ),
+        FightKind::DeathMatch => init_msg.push(
+            Msg::new()
+                .color(Color::Yellow)
+                .text("Tonight's fight is a Death Match!"),
         ),
         FightKind::TeamBattle => init_msg.push(
             Msg::new()
@@ -523,13 +576,13 @@ fn royal_rumble(
     mut fight: ResMut<Fight>,
     mut ctx: Context,
 ) -> impl IntoResponse {
-    if fight.status == FightStatus::Happening {
-        return Err("Shut up and watch the show".to_owned());
+    if let Err(e) = check_idle(&fight.status) {
+        return Err(e);
     }
 
-    fight.kind = FightKind::FreeForAll;
     fight.status = FightStatus::WaitingWho;
     fight.channel = channel.to_owned();
+    fight.kind = FightKind::RoyalRumble;
 
     ctx.who(&channel);
 
@@ -571,6 +624,8 @@ fn show_help() -> impl IntoResponse {
             ",f <nick> ... vs <nick> ... | team battle",
             ",f <nick> <nick> <nick> ... | free for all",
             ",royalrumble                | chan wide free for all",
+            ",challenge <nick>           | challenge someone to a deathmatch",
+            ",accept                     | accept a challenge",
             ",s                          | show the current fight status",
             ",stop                       | stop the current fight",
             ",hof                        | hall of fame",
@@ -586,26 +641,86 @@ fn show_status(fight: Res<Fight>) -> impl IntoResponse {
     format!("{} fighters remaining", fight.fighters.len())
 }
 
-fn stop(mut fight: ResMut<Fight>) {
-    fight.fighters = vec![];
-    fight.channel = "".to_owned();
-    fight.status = FightStatus::Idle;
+fn stop(prefix: IrcPrefix, mut fight: ResMut<Fight>) -> impl IntoResponse {
+    if fight.kind == FightKind::DeathMatch {
+        return Err("Can't stop a deathmatch");
+    }
+    if prefix.nick == "sht" {
+        return Err("Not you you can't you grumpy nigga");
+    }
+    fight.reset();
+
+    Ok(())
 }
 
-fn whoreply(arguments: AnyArguments, mut fight: ResMut<Fight>, mut rng: ResMut<StdRng>) {
-    let color = COLORS.iter().choose(&mut *rng).unwrap();
-    let idx = fight.fighters.len();
-
-    fight
-        .fighters
-        .push(Fighter::new(arguments[5], *color.clone(), idx));
-}
-
-fn start_rumble(
+fn whoreply(
+    arguments: AnyArguments,
     mut fight: ResMut<Fight>,
     mut rng: ResMut<StdRng>,
     mut ctx: Context,
-) -> impl IntoResponse {
+) {
+    match fight.kind {
+        FightKind::DeathMatch => {
+            if arguments[5] != fight.challengee.as_ref().unwrap() {
+                return;
+            };
+            fight.status =
+                FightStatus::WaitingChallengee(arguments[5].to_owned(), SystemTime::now());
+
+            ctx.privmsg(
+                &fight.channel,
+                &Msg::new()
+                    .color(Color::Yellow)
+                    .text(format!(
+                        "{} you have been challenged to a deathmatch.",
+                        arguments[5]
+                    ))
+                    .to_string(),
+            );
+            ctx.privmsg(
+                &fight.channel,
+                &Msg::new()
+                    .color(Color::Yellow)
+                    .text("you have 30s to accept or pussy out like the little bitch that you are.")
+                    .to_string(),
+            );
+        }
+        FightKind::RoyalRumble => {
+            let color = COLORS.iter().choose(&mut *rng).unwrap();
+            let idx = fight.fighters.len();
+
+            fight
+                .fighters
+                .push(Fighter::new(arguments[5], *color.clone(), idx));
+        }
+        _ => {}
+    }
+}
+
+fn endofwho(mut fight: ResMut<Fight>, rng: ResMut<StdRng>, mut ctx: Context) {
+    match fight.kind {
+        FightKind::DeathMatch => {
+            if fight.status == FightStatus::WaitingWho {
+                ctx.privmsg(
+                    &fight.channel,
+                    &Msg::new()
+                        .color(Color::Yellow)
+                        .text(format!(
+                            "there's no {} here you stupid fuck",
+                            fight.challengee.as_ref().unwrap()
+                        ))
+                        .to_string(),
+                );
+                fight.reset();
+                return;
+            }
+        }
+        FightKind::RoyalRumble => start_rumble(fight, rng, ctx),
+        _ => {}
+    }
+}
+
+fn start_rumble(mut fight: ResMut<Fight>, mut rng: ResMut<StdRng>, mut ctx: Context) {
     fight.status = FightStatus::Happening;
 
     let mut init_msg = vec![Msg::new()
@@ -639,5 +754,99 @@ fn start_rumble(
 
     for line in init_msg {
         ctx.privmsg(&fight.channel, &line.to_string())
+    }
+}
+
+fn challenge(
+    prefix: IrcPrefix,
+    arguments: Arguments<'_, 1>,
+    channel: Channel,
+    mut fight: ResMut<Fight>,
+    mut ctx: Context,
+    mut rng: ResMut<StdRng>,
+) -> impl IntoResponse {
+    if let Err(e) = check_idle(&fight.status) {
+        return Err(e);
+    }
+
+    fight.status = FightStatus::WaitingWho;
+    fight.channel = channel.to_owned();
+    fight.kind = FightKind::DeathMatch;
+    fight.challengee = Some(arguments[0].to_owned());
+
+    let color = COLORS.iter().choose(&mut *rng).unwrap();
+    fight
+        .fighters
+        .push(Fighter::new(prefix.nick, *color.clone(), 0));
+
+    ctx.who(&channel);
+
+    Ok(())
+}
+
+fn accept_challenge(
+    prefix: IrcPrefix,
+    _: Arguments<'_, 0>,
+    mut fight: ResMut<Fight>,
+    mut rng: ResMut<StdRng>,
+) -> impl IntoResponse {
+    let status = fight.status.clone();
+    if let FightStatus::WaitingChallengee(nick, _) = status {
+        if nick != prefix.nick {
+            return Err("you haven't been challenged you stupid fuck.".to_owned());
+        }
+
+        let mut color = COLORS.iter().choose(&mut *rng).unwrap();
+        while **color == fight.fighters[0].color {
+            color = COLORS.iter().choose(&mut *rng).unwrap();
+        }
+        fight
+            .fighters
+            .push(Fighter::new(prefix.nick, Color::Cyan, 1));
+        fight.status = FightStatus::Happening;
+
+        let mut init_msg = vec![Msg::new()
+            .color(Color::Yellow)
+            .text("THE FIGHT IS ABOUT TO BEGIN! TAKE YOUR BETS!")];
+
+        init_msg.push(
+            Msg::new()
+                .color(Color::Yellow)
+                .text("Tonight's fight is a DEATH MATCH!"),
+        );
+
+        init_msg.push(
+            Msg::new()
+                .color(Color::Yellow)
+                .text("Everyone please welcome our contenders:"),
+        );
+
+        for f in &fight.fighters {
+            init_msg.push(
+                Msg::new()
+                    .color(f.color)
+                    .text(&f.nick)
+                    .color(Color::Yellow)
+                    .text("! ")
+                    .text(PRESENTATIONS.choose(&mut *rng).unwrap()),
+            )
+        }
+
+        init_msg.push(Msg::new().color(Color::Yellow).text("TO THE DEATH!"));
+
+        return Ok((false, init_msg));
+    }
+
+    return Err("you haven't been challenged you stupid fuck.".to_owned());
+}
+
+fn check_idle(status: &FightStatus) -> Result<(), String> {
+    match status {
+        FightStatus::Happening => Err("Shut up and watch the show".to_owned()),
+        FightStatus::WaitingWho => Err("".to_owned()),
+        FightStatus::WaitingChallengee(_, _) => {
+            Err("A challenge is waiting to be accepted.".to_owned())
+        }
+        FightStatus::Idle => Ok(()),
     }
 }
