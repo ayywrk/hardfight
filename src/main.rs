@@ -9,7 +9,7 @@ use std::{
 use ircie::{
     format::{Color, Msg},
     system::IntoResponse,
-    system_params::{AnyArguments, Res, ResMut},
+    system_params::{AnyArguments, Channel, Context, Res, ResMut},
     Irc,
 };
 use itertools::Itertools;
@@ -208,6 +208,7 @@ enum FightStatus {
 #[derive(Default)]
 struct Fight {
     status: FightStatus,
+    channel: String,
     kind: FightKind,
     fighters: Vec<Fighter>,
 }
@@ -240,13 +241,14 @@ async fn main() -> std::io::Result<()> {
 }
 
 fn fight(
+    mut ctx: Context,
     mut fight: ResMut<Fight>,
     mut rng: ResMut<StdRng>,
     mut hall_of_fame: ResMut<HallOfFame>,
-) -> impl IntoResponse {
+) {
     if fight.status == FightStatus::Idle {
         std::thread::sleep(Duration::from_millis(50));
-        return None;
+        return;
     }
 
     let teams_remaining: Vec<_> = fight
@@ -304,7 +306,11 @@ fn fight(
         fight.fighters = vec![];
         hall_of_fame.save(SAVE_LOC).unwrap();
 
-        return Some((false, lines));
+        for line in lines {
+            ctx.privmsg(&fight.channel, &line.to_string())
+        }
+        fight.channel = "".to_owned();
+        return;
     }
 
     let mut lines = vec![];
@@ -383,11 +389,14 @@ fn fight(
         fight.fighters.remove(victim_idx);
     }
 
-    Some((false, lines))
+    for line in lines {
+        ctx.privmsg(&fight.channel, &line.to_string())
+    }
 }
 
 fn new_fight(
     arguments: AnyArguments,
+    channel: Channel,
     mut fight: ResMut<Fight>,
     mut rng: ResMut<StdRng>,
 ) -> impl IntoResponse {
@@ -441,6 +450,8 @@ fn new_fight(
     }
 
     fight.status = FightStatus::Happening;
+
+    fight.channel = channel.to_owned();
 
     let mut init_msg = vec![Msg::new()
         .color(Color::Yellow)
