@@ -234,7 +234,10 @@ async fn main() -> std::io::Result<()> {
         .add_system("h", show_help)
         .await
         .add_system("s", show_status)
-        .await;
+        .await
+        .add_system("stop", stop)
+        .await
+        ;
 
     irc.run().await?;
     Ok(())
@@ -532,6 +535,7 @@ fn show_help() -> impl IntoResponse {
             ",f <nick> ... vs <nick> ... | team battle",
             ",f <nick> <nick> <nick> ... | free for all",
             ",s                          | show the current fight status",
+            ",stop                       | stop the current fight",
             ",hof                        | hall of fame",
         ],
     )
@@ -543,4 +547,10 @@ fn show_status(fight: Res<Fight>) -> impl IntoResponse {
     }
 
     format!("{} fighters remaining", fight.fighters.len())
+}
+
+fn stop(mut fight: ResMut<Fight>) {
+    fight.fighters = vec![];
+    fight.channel = "".to_owned();
+    fight.status = FightStatus::Idle;
 }
