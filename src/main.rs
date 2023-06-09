@@ -8,8 +8,9 @@ use std::{
 
 use ircie::{
     format::{Color, Msg},
+    irc_command::IrcCommand,
     system::IntoResponse,
-    system_params::{AnyArguments, Channel, Context, Res, ResMut},
+    system_params::{AnyArguments, Arguments, Channel, Context, Res, ResMut},
     Irc,
 };
 use itertools::Itertools;
@@ -201,6 +202,7 @@ enum FightKind {
 #[derive(Default, PartialEq, Eq)]
 enum FightStatus {
     Happening,
+    WaitingWho,
     #[default]
     Idle,
 }
@@ -227,7 +229,13 @@ async fn main() -> std::io::Result<()> {
         .await
         .add_interval_task(Duration::from_secs(1), fight)
         .await
+        .add_event_system(IrcCommand::RPL_WHOREPLY, whoreply)
+        .await
+        .add_event_system(IrcCommand::RPL_ENDOFWHO, start_rumble)
+        .await
         .add_system("f", new_fight)
+        .await
+        .add_system("royalrumble", royal_rumble)
         .await
         .add_system("hof", show_hall_of_fame)
         .await
@@ -236,8 +244,7 @@ async fn main() -> std::io::Result<()> {
         .add_system("s", show_status)
         .await
         .add_system("stop", stop)
-        .await
-        ;
+        .await;
 
     irc.run().await?;
     Ok(())
@@ -249,7 +256,7 @@ fn fight(
     mut rng: ResMut<StdRng>,
     mut hall_of_fame: ResMut<HallOfFame>,
 ) {
-    if fight.status == FightStatus::Idle {
+    if fight.status != FightStatus::Happening {
         std::thread::sleep(Duration::from_millis(50));
         return;
     }
@@ -305,6 +312,15 @@ fn fight(
         for w in &winners {
             lines.push(Msg::new().text("!beer ").text(&w.nick));
         }
+
+        ctx.mode(
+            &fight.channel,
+            &format!(
+                "+{} {}",
+                "v".repeat(winners.len()),
+                winners.iter().map(|w| &w.nick).join(" ")
+            ),
+        );
 
         fight.fighters = vec![];
         hall_of_fame.save(SAVE_LOC).unwrap();
@@ -389,6 +405,7 @@ fn fight(
                 .text(" is lying dead!"),
         );
         hall_of_fame.add_fucking_looser(&fucking_victim.nick);
+        ctx.mode(&fight.channel, &format!("-v {}", fucking_victim.nick));
         fight.fighters.remove(victim_idx);
     }
 
@@ -500,6 +517,25 @@ fn new_fight(
     Ok((false, init_msg))
 }
 
+fn royal_rumble(
+    _: Arguments<'_, 0>,
+    channel: Channel,
+    mut fight: ResMut<Fight>,
+    mut ctx: Context,
+) -> impl IntoResponse {
+    if fight.status == FightStatus::Happening {
+        return Err("Shut up and watch the show".to_owned());
+    }
+
+    fight.kind = FightKind::FreeForAll;
+    fight.status = FightStatus::WaitingWho;
+    fight.channel = channel.to_owned();
+
+    ctx.who(&channel);
+
+    Ok(())
+}
+
 fn show_hall_of_fame(hall_of_fame: Res<HallOfFame>) -> impl IntoResponse {
     let sorted_hof = hall_of_fame
         .iter()
@@ -534,6 +570,7 @@ fn show_help() -> impl IntoResponse {
             ",f <nick> <nick>            | duel fight",
             ",f <nick> ... vs <nick> ... | team battle",
             ",f <nick> <nick> <nick> ... | free for all",
+            ",royalrumble                | chan wide free for all",
             ",s                          | show the current fight status",
             ",stop                       | stop the current fight",
             ",hof                        | hall of fame",
@@ -553,4 +590,54 @@ fn stop(mut fight: ResMut<Fight>) {
     fight.fighters = vec![];
     fight.channel = "".to_owned();
     fight.status = FightStatus::Idle;
+}
+
+fn whoreply(arguments: AnyArguments, mut fight: ResMut<Fight>, mut rng: ResMut<StdRng>) {
+    let color = COLORS.iter().choose(&mut *rng).unwrap();
+    let idx = fight.fighters.len();
+
+    fight
+        .fighters
+        .push(Fighter::new(arguments[5], *color.clone(), idx));
+}
+
+fn start_rumble(
+    mut fight: ResMut<Fight>,
+    mut rng: ResMut<StdRng>,
+    mut ctx: Context,
+) -> impl IntoResponse {
+    fight.status = FightStatus::Happening;
+
+    let mut init_msg = vec![Msg::new()
+        .color(Color::Yellow)
+        .text("THE FIGHT IS ABOUT TO BEGIN! TAKE YOUR BETS!")];
+
+    init_msg.push(
+        Msg::new()
+            .color(Color::Yellow)
+            .text("Tonight's fight is a RRRRRRROYAL RUMBLE!"),
+    );
+
+    init_msg.push(
+        Msg::new()
+            .color(Color::Yellow)
+            .text("Everyone please welcome our contenders:"),
+    );
+
+    for f in &fight.fighters {
+        init_msg.push(
+            Msg::new()
+                .color(f.color)
+                .text(&f.nick)
+                .color(Color::Yellow)
+                .text("! ")
+                .text(PRESENTATIONS.choose(&mut *rng).unwrap()),
+        )
+    }
+
+    init_msg.push(Msg::new().color(Color::Yellow).text("TO THE DEATH!"));
+
+    for line in init_msg {
+        ctx.privmsg(&fight.channel, &line.to_string())
+    }
 }
