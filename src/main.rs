@@ -107,6 +107,7 @@ const COLORS: &'static [&'static Color] = &[
     &Color::Teal,
 ];
 
+#[derive(Clone)]
 struct Fighter {
     nick: String,
     health: f32,
@@ -241,7 +242,7 @@ async fn main() -> std::io::Result<()> {
         .await
         .add_resource(HallOfFame::load(SAVE_LOC).unwrap())
         .await
-        .add_interval_task(Duration::from_secs(1), fight)
+        .add_interval_task(Duration::from_millis(10), fight)
         .await
         .add_event_system(IrcCommand::RPL_WHOREPLY, whoreply)
         .await
@@ -292,6 +293,7 @@ fn fight(
     }
 
     if fight.status != FightStatus::Happening {
+        std::thread::sleep(Duration::from_millis(500));
         return;
     }
 
@@ -313,38 +315,49 @@ fn fight(
             .filter(|f| f.team_idx == team_idx)
             .collect::<Vec<_>>();
 
-        let mut lines = vec![];
-
         if fight.fighters.len() == 1 {
-            lines.push(
-                Msg::new()
+            ctx.privmsg(
+                &fight.channel,
+                &Msg::new()
                     .color(Color::Yellow)
                     .text("We have a winner! -> ")
                     .color(winners[0].color)
                     .text(&winners[0].nick)
                     .color(Color::Yellow)
-                    .text(" <- !"),
+                    .text(" <- !")
+                    .to_string(),
             );
             hall_of_fame.add_winner(&winners[0].nick);
         } else {
-            lines.push(Msg::new().color(Color::Yellow).text("We have winners!"));
+            ctx.privmsg(
+                &fight.channel,
+                &Msg::new()
+                    .color(Color::Yellow)
+                    .text("We have winners!")
+                    .to_string(),
+            );
+
             for w in &winners {
-                lines.push(
-                    Msg::new()
+                ctx.privmsg(
+                    &fight.channel,
+                    &Msg::new()
                         .color(Color::Yellow)
                         .text("-> ")
                         .color(w.color)
                         .text(&w.nick)
                         .color(Color::Yellow)
-                        .text(" <-"),
+                        .text(" <-")
+                        .to_string(),
                 );
-
                 hall_of_fame.add_winner(&w.nick);
             }
         }
 
         for w in &winners {
-            lines.push(Msg::new().text("!beer ").text(&w.nick));
+            ctx.privmsg(
+                &fight.channel,
+                &Msg::new().text("!beer ").text(&w.nick).to_string(),
+            );
         }
 
         ctx.mode(
@@ -358,68 +371,59 @@ fn fight(
 
         fight.fighters = vec![];
         hall_of_fame.save(SAVE_LOC).unwrap();
-
-        for line in lines {
-            ctx.privmsg(&fight.channel, &line.to_string())
-        }
         fight.channel = "".to_owned();
         return;
     }
 
-    let mut lines = vec![];
-
     let body_part = BODYPARTS.choose(&mut *rng).unwrap();
     let action = ACTIONS.choose(&mut *rng).unwrap();
-    let damage = rng.gen::<f32>() * 80.;
+    let damage = rng.gen::<f32>() * 75.;
 
-    let victim_idx = rng.gen_range(0..fight.fighters.len());
-    let mut fucking_victim = fight.fighters.get_mut(victim_idx).unwrap();
+    let attacker = fight.fighters.choose(&mut *rng).unwrap().clone();
+    let chan = fight.channel.clone();
 
-    if fucking_victim.nick == "wrk" {
-        // ;)
-        fucking_victim = fight.fighters.get_mut(victim_idx).unwrap();
-    }
-
-    fucking_victim.health -= damage;
-
-    let fucking_victim = fight.fighters.get(victim_idx).unwrap();
-
-    let attacker = if fight
+    let fucking_victim = if fight
         .fighters
         .iter()
-        .filter(|f| f.team_idx == fucking_victim.team_idx && f.nick != fucking_victim.nick)
+        .filter(|f| f.team_idx == attacker.team_idx && f.nick != attacker.nick)
         .count()
         != 0
         && rng.gen_bool(1. / 4.)
     {
-        let attacker = fight
+        let victim = fight
             .fighters
-            .iter()
-            .filter(|f| f.team_idx == fucking_victim.team_idx && f.nick != fucking_victim.nick)
+            .iter_mut()
+            .filter(|f| f.team_idx == attacker.team_idx && f.nick != attacker.nick)
             .choose(&mut *rng)
             .unwrap();
 
-        lines.push(
-            Msg::new()
+        ctx.privmsg(
+            &chan,
+            &Msg::new()
                 .color(Color::Yellow)
                 .text("Oh no! ")
                 .color(attacker.color)
                 .text(&attacker.nick)
                 .color(Color::Yellow)
-                .text(&format!(" is fucking retarded and is attacking his mate!")),
+                .text(&format!(" is fucking retarded and is attacking his mate!"))
+                .to_string(),
         );
-        attacker
+        victim
     } else {
         fight
             .fighters
-            .iter()
-            .filter(|f| f.team_idx != fucking_victim.team_idx)
+            .iter_mut()
+            .filter(|f| f.team_idx != attacker.team_idx)
             .choose(&mut *rng)
             .unwrap()
     };
 
-    lines.push(
-        Msg::new()
+    fucking_victim.health -= damage;
+    let fucking_victim = fucking_victim.clone();
+
+    ctx.privmsg(
+        &fight.channel,
+        &Msg::new()
             .color(attacker.color)
             .text(&attacker.nick)
             .reset()
@@ -427,33 +431,35 @@ fn fight(
             .color(fucking_victim.color)
             .text(&fucking_victim.nick)
             .reset()
-            .text(&format!("'s {}! (-{:.2} hp)", body_part, damage)),
+            .text(&format!("'s {}! (-{:.2} hp)", body_part, damage))
+            .to_string(),
     );
 
     if fucking_victim.health <= 0. {
-        lines.push(
-            Msg::new()
+        ctx.privmsg(
+            &fight.channel,
+            &Msg::new()
                 .color(fucking_victim.color)
                 .text(&fucking_victim.nick)
                 .color(Color::Yellow)
-                .text(" is lying dead!"),
+                .text(" is lying dead!")
+                .to_string(),
         );
         hall_of_fame.add_fucking_looser(&fucking_victim.nick);
         ctx.mode(&fight.channel, &format!("-v {}", fucking_victim.nick));
 
         if fight.kind == FightKind::DeathMatch {
-            ctx.kick(
-                &fight.channel,
-                &fucking_victim.nick,
-                Some("You fucking suck"),
+            ctx.privmsg(
+                "ChanServ",
+                &format!(
+                    "KICK {} {} {}",
+                    fight.channel, fucking_victim.nick, "You fucking looser"
+                ),
             );
         }
-        fight.fighters.remove(victim_idx);
+        fight.fighters.retain(|f| f.nick != fucking_victim.nick);
     }
-
-    for line in lines {
-        ctx.privmsg(&fight.channel, &line.to_string())
-    }
+    std::thread::sleep(Duration::from_millis(rng.gen_range(200..800)));
 }
 
 fn new_fight(
@@ -672,16 +678,10 @@ fn whoreply(
                 &Msg::new()
                     .color(Color::Yellow)
                     .text(format!(
-                        "{} you have been challenged to a deathmatch.",
+                        "{} challenges {} to a deathmatch! you have 30s to ,accept or YOURE A BITCH",
+                        fight.fighters[0].nick,
                         arguments[5]
                     ))
-                    .to_string(),
-            );
-            ctx.privmsg(
-                &fight.channel,
-                &Msg::new()
-                    .color(Color::Yellow)
-                    .text("you have 30s to accept or pussy out like the little bitch that you are.")
                     .to_string(),
             );
         }
