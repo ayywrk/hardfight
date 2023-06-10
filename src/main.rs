@@ -327,7 +327,9 @@ fn fight(
                     .text(" <- !")
                     .to_string(),
             );
-            hall_of_fame.add_winner(&winners[0].nick);
+            if fight.kind == FightKind::DeathMatch {
+                hall_of_fame.add_winner(&winners[0].nick);
+            }
         } else {
             ctx.privmsg(
                 &fight.channel,
@@ -349,7 +351,9 @@ fn fight(
                         .text(" <-")
                         .to_string(),
                 );
-                hall_of_fame.add_winner(&w.nick);
+                if fight.kind == FightKind::DeathMatch {
+                    hall_of_fame.add_winner(&w.nick);
+                }
             }
         }
 
@@ -445,10 +449,11 @@ fn fight(
                 .text(" is lying dead!")
                 .to_string(),
         );
-        hall_of_fame.add_fucking_looser(&fucking_victim.nick);
         ctx.mode(&fight.channel, &format!("-v {}", fucking_victim.nick));
 
         if fight.kind == FightKind::DeathMatch {
+            hall_of_fame.add_fucking_looser(&fucking_victim.nick);
+
             ctx.privmsg(
                 "ChanServ",
                 &format!(
